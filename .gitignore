@@ -1,0 +1,19 @@
+# Generated pipeline outputs
+output/
+**/*.sqlite3
+**/tidy_output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
