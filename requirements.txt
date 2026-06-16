@@ -1,3 +1,8 @@
 pandas>=2.0
 openpyxl>=3.1
 xlsxwriter>=3.1
+numpy>=1.24
+# matplotlib is imported (unconditionally) by the tidy converters
+# extend-fig1-tidy-files.py and extract_tidy_fig1d_and_Fig2a_2g.py, even when
+# make_plots=False, so it is required to run the pipeline / verify --reproduce.
+matplotlib>=3.7

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build a minimal SQLite DB used by catsim from tidy CSVs.
+"""Build the canonical per-figure SQLite DB from the tidy CSVs.
 
-Purpose: Avoid XLSX processing during reproducibility runs.
-Input: directory containing tidy_output/**/_tidy.csv files.
-Output: sqlite3 DB with a simple schema used by prediction scripts.
+Purpose: give downstream consumers one table per figure without re-parsing XLSX.
+Input: directory containing tidy_output/**/*_tidy.csv files.
+Output: sqlite3 DB with one table per tidy CSV (named after the figure) plus a
+        dataset_registry table.
 
-This is intentionally conservative: it loads only columns present in the tidy CSVs.
+This is intentionally conservative: each tidy CSV is loaded verbatim with
+df.to_sql, so the table is a 1:1 image of the CSV (no reshaping, no column drops).
 """
 
 import argparse

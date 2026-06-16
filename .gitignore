@@ -3,6 +3,11 @@ output/
 **/*.sqlite3
 **/tidy_output/
 
+# Generated reports
+pipeline/verification_report.csv
+pipeline/db_summary.csv
+verify/fidelity_report.csv
+
 # Python
 __pycache__/
 *.pyc
