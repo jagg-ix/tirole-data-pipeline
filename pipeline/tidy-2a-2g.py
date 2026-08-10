@@ -9,6 +9,36 @@ import pandas as pd
 import os
 from pathlib import Path
 
+
+def series_from_header(raw: pd.DataFrame) -> str:
+    """Read 'model' vs 'measured' off the sheet's own axis labels.
+
+    The workbook qualifies modelled axes explicitly -- 'Frequencies - model
+    (THz)' / 'Slit separation - model (fs)' (Fig 2g, Extended Fig 3b), and
+    'Frequencies - adiabatic model (THz)' (Extended Fig 3c).  Measured sheets
+    carry the bare form, 'Frequencies (THz)' / 'Slit separation (fs)', which is
+    also how the measured row of Fig 2e is distinguished from its own '- model'
+    counterpart directly below it.
+
+    This label used to be hardcoded per sheet index, which marked Fig 2f as
+    'model'.  It is not: its header is unqualified, 135 of its 640 counts at
+    S = 800 fs are negative (a model does not emit negative photon counts), and
+    it correlates at r = +1.000 with the acknowledged measured Fig 2a -- Fig 2a
+    is a 221.0-229.5 THz crop of Fig 2f's full 220.1-242.6 THz window.  The same
+    array reached the database correctly labelled 'measured' through
+    Extended_Fig_3a, whose converter reads the header the way this now does.
+    Mislabelling it hid 27 measured slit separations and 2.7x the bandwidth.
+    """
+    labels = " ".join(
+        str(v).lower()
+        for row in (0, 1)
+        if row < len(raw)
+        for v in raw.iloc[row, :3]
+        if pd.notna(v)
+    )
+    return "model" if "model" in labels else "measured"
+
+
 def tidy_fig2(file_path: str, output_dir: str):
     base = Path(file_path).stem.lower()
     print(f"🔍 Processing {file_path}")
@@ -64,10 +94,13 @@ def tidy_fig2(file_path: str, output_dir: str):
     # Case: Fig_2f → matrix: slit separation × frequency spectrum
     # ─────────────────────────────────────────────
     elif base.startswith("fig_2f"):
+        label = series_from_header(raw)
         # Layout (header=None):
         #   row0: [label, label, f1, f2, ...]
         #   row1: labels
         #   row2+: [S_fs, NaN, I(f1), I(f2), ...]
+        # This is MEASURED data at 27 slit separations, not a model -- see
+        # series_from_header().  Fig 2a/2b/2c/2d are narrow crops of it.
         slit_sep = pd.to_numeric(raw.iloc[2:, 0], errors="coerce")
         freqs = pd.to_numeric(raw.iloc[0, 2:], errors="coerce")
         values = raw.iloc[2:, 2:].apply(pd.to_numeric, errors="coerce")
@@ -84,7 +117,7 @@ def tidy_fig2(file_path: str, output_dir: str):
                         "Slit_separation_fs": float(s),
                         "Frequency_THz": float(f),
                         "Intensity": float(v),
-                        "Series": "model",
+                        "Series": label,
                     })
         tidy_df = pd.DataFrame(records)
 
@@ -92,6 +125,7 @@ def tidy_fig2(file_path: str, output_dir: str):
     # Case: Fig_2g → matrix: slit separation × frequency (modelled spectrum)
     # ─────────────────────────────────────────────
     elif base.startswith("fig_2g"):
+        label = series_from_header(raw)
         # Layout (header=None) — identical in shape to Fig_2f:
         #   row0: [label, 'Frequencies - model (THz)', f1, f2, ...]
         #   row1: ['Slit separation - model (fs)', 'Counts (MHz):', NaN, ...]
@@ -129,7 +163,7 @@ def tidy_fig2(file_path: str, output_dir: str):
                         "Slit_separation_fs": float(s),
                         "Frequency_THz": float(f),
                         "Intensity": float(v),
-                        "Series": "model",
+                        "Series": label,
                     })
         tidy_df = pd.DataFrame(records)
 
