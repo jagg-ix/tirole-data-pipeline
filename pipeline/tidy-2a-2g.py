@@ -89,29 +89,46 @@ def tidy_fig2(file_path: str, output_dir: str):
         tidy_df = pd.DataFrame(records)
 
     # ─────────────────────────────────────────────
-    # Case: Fig_2g → time-domain heatmap: slit separation × delay
+    # Case: Fig_2g → matrix: slit separation × frequency (modelled spectrum)
     # ─────────────────────────────────────────────
     elif base.startswith("fig_2g"):
-        # Layout (header=None):
-        #   row0: [label, t1_s, t2_s, ...]
-        #   row1: [label text, NaN, NaN, ...]
-        #   row2+: [S_fs, I(t1), I(t2), ...]
+        # Layout (header=None) — identical in shape to Fig_2f:
+        #   row0: [label, 'Frequencies - model (THz)', f1, f2, ...]
+        #   row1: ['Slit separation - model (fs)', 'Counts (MHz):', NaN, ...]
+        #   row2+: [S_fs, NaN, I(f1), I(f2), ...]
+        #
+        # This sheet was previously read as a time-domain heatmap: its frequency axis
+        # was labelled Delay_fs and multiplied by 1e15 as if it were seconds, which put
+        # modelled SPECTRA into the time_domain table with corrupted values.
+        # Evidence that this axis is a frequency grid stored with an extra 1e-12 factor:
+        #   * the source header says so: 'Frequencies - model (THz)', with the row axis
+        #     'Slit separation - model (fs)' -- the same shape as the measured Fig 2f;
+        #   * rescaled by 1e12 the grid spans 217.391-245.902 THz, which is EXACTLY the
+        #     1380 nm - 1220 nm window at c = 3e8 m/s (endpoints 5000/23 and 15000/61),
+        #     the near-IR band of the experiment; the measured Fig 2f grid
+        #     (220.093-242.643 THz) sits inside it;
+        #   * read instead as seconds -> fs (the previous x1e15) the axis would span
+        #     217-246 ps, ~300x beyond any delay in the paper (Extended Fig 2: +/-800 fs).
+        # Fig 2g and Extended Fig 3b hold byte-identical arrays (main text + extended).
         slit_sep = pd.to_numeric(raw.iloc[2:, 0], errors="coerce")
-        delays_s = pd.to_numeric(raw.iloc[0, 1:], errors="coerce")
-        values = raw.iloc[2:, 1:].apply(pd.to_numeric, errors="coerce")
+        freqs = pd.to_numeric(raw.iloc[0, 2:], errors="coerce")
+        finite = freqs.dropna()
+        if not finite.empty and finite.abs().median() < 1e-6:
+            freqs = freqs * 1e12
+        values = raw.iloc[2:, 2:].apply(pd.to_numeric, errors="coerce")
         records = []
         for i, s in enumerate(slit_sep):
             if pd.isna(s):
                 continue
-            for j, t_s in enumerate(delays_s):
-                if j >= values.shape[1] or pd.isna(t_s):
+            for j, f in enumerate(freqs):
+                if j >= values.shape[1] or pd.isna(f):
                     continue
                 v = values.iat[i, j]
                 if pd.notna(v):
                     records.append({
                         "Slit_separation_fs": float(s),
-                        "Delay_fs": float(t_s) * 1e15,
-                        "Reflectivity": float(v),
+                        "Frequency_THz": float(f),
+                        "Intensity": float(v),
                         "Series": "model",
                     })
         tidy_df = pd.DataFrame(records)

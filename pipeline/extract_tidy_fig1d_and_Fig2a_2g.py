@@ -30,12 +30,16 @@ def tidy_fig_workbook(file_path: str, output_dir: str, make_plots: bool = False)
     # Case: Fig 1d (intensity vs reflectivity, single pump)
     # ────────────────────────────────────────────────
     if "fig_1d" in base_name.lower():
-        intensities = pd.to_numeric(raw.iloc[0, 1:], errors="coerce").dropna().values
-        refl        = pd.to_numeric(raw.iloc[1, 1:], errors="coerce").dropna().values
+        # The Fig 1d x-axis is 'Delay (fs)' in the source workbook, not an intensity
+        # sweep (that is Extended Fig 1c, 'Intensiy (GW/cm^2)').  Labelling it
+        # Intensity_GW_cm2 both mis-described the quantity and denied the loader the
+        # Delay_fs/Reflectivity pair it routes on, so Fig 1d contributed no rows.
+        delays = pd.to_numeric(raw.iloc[0, 1:], errors="coerce").dropna().values
+        refl   = pd.to_numeric(raw.iloc[1, 1:], errors="coerce").dropna().values
 
-        min_len = min(len(intensities), len(refl))
+        min_len = min(len(delays), len(refl))
         tidy_df = pd.DataFrame({
-            "Intensity_GW_cm2": intensities[:min_len],
+            "Delay_fs": delays[:min_len],
             "Reflectivity": refl[:min_len]
         })
 
@@ -78,8 +82,8 @@ def tidy_fig_workbook(file_path: str, output_dir: str, make_plots: bool = False)
     if make_plots:
         plt.figure(figsize=(8, 5))
         if "fig_1d" in base_name.lower():
-            plt.plot(tidy_df["Intensity_GW_cm2"], tidy_df["Reflectivity"], "o-", lw=1.4)
-            plt.xlabel("Intensity (GW/cm²)")
+            plt.plot(tidy_df["Delay_fs"], tidy_df["Reflectivity"], "o-", lw=1.4)
+            plt.xlabel("Delay (fs)")
         elif "fig_2" in base_name.lower():
             for sep, g in tidy_df.groupby("Slit_separation_fs"):
                 label = f"{sep:.1f} fs" if sep < 100 else f"{sep:.0f} fs"

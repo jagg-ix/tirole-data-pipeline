@@ -178,6 +178,22 @@ def init_db(conn):
         series TEXT,
         FOREIGN KEY(experiment_id) REFERENCES experiments(id)
     );
+    -- Panels that are neither a spectrum nor a time trace: Fig 2e (slit separation vs
+    -- spectral oscillation period) and Extended Fig 1c (pump-intensity sweep vs
+    -- reflectivity).  Rather than mis-file them into spectra/time_domain -- which would
+    -- silently corrupt the meaning of those tables -- they are stored as labelled x/y
+    -- pairs, with the source axis names carried alongside the values so the quantity
+    -- stays self-describing.
+    CREATE TABLE IF NOT EXISTS derived_series (
+        id INTEGER PRIMARY KEY,
+        experiment_id INTEGER,
+        x_label TEXT,
+        y_label TEXT,
+        x REAL,
+        y REAL,
+        series TEXT,
+        FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+    );
     """)
     conn.commit()
 
@@ -287,10 +303,51 @@ def load_csv_to_db(conn, csv_file):
         """, rows)
         conn.commit()
 
+    # Fallback: a panel that is neither a spectrum nor a time trace (Fig 2e, Extended
+    # Fig 1c) still carries real measurements.  Store the first two numeric columns as a
+    # labelled x/y pair so nothing is dropped and nothing is mis-typed.
+    is_time = {"Delay_fs", "Reflectivity"}.issubset(df.columns)
+    is_spec = "Frequency_THz" in df.columns and "Intensity" in df.columns
+    if not is_time and not is_spec:
+        numeric_cols = [c for c in df.columns
+                        if pd.to_numeric(df[c], errors="coerce").notna().any()]
+        if len(numeric_cols) >= 2:
+            xcol, ycol = numeric_cols[0], numeric_cols[1]
+            # A per-row label column (e.g. Extended Fig 1c's `Pump`) becomes the series.
+            label_col = next((c for c in ("Series", "series", "Pump")
+                              if c in df.columns), None)
+            xs = pd.to_numeric(df[xcol], errors="coerce")
+            ys = pd.to_numeric(df[ycol], errors="coerce")
+            labels = df[label_col].astype(str) if label_col else [None] * len(df)
+            rows = [(exp_id, xcol, ycol, float(x), float(y), lab)
+                    for x, y, lab in zip(xs, ys, labels)
+                    if pd.notna(x) and pd.notna(y)]
+            if rows:
+                cur = conn.cursor()
+                cur.executemany("""
+                    INSERT INTO derived_series
+                        (experiment_id, x_label, y_label, x, y, series)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, rows)
+                conn.commit()
+
 def load_all_csvs():
     print("=== Step 3: Load tidy CSVs into SQLite ===")
     conn = sqlite3.connect(DB_FILE)
     init_db(conn)
+    # The load stage is not idempotent on its own: `init_db` uses CREATE TABLE IF NOT
+    # EXISTS, so re-running against an existing DB appends a second copy of every
+    # experiment (17 figures -> 34 rows), which then double-counts in any GROUP BY or
+    # join. Clear the tables first so a reload replaces rather than accumulates.
+    cur = conn.cursor()
+    for table in ("spectra", "time_domain", "derived_series", "experiments"):
+        cur.execute(f"DELETE FROM {table}")
+    # sqlite_sequence only exists when a table uses AUTOINCREMENT; ignore when absent.
+    try:
+        cur.execute("DELETE FROM sqlite_sequence WHERE name IN ('spectra','time_domain','derived_series','experiments')")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
     for csv_file in Path(TIDY_DIR).rglob("*.csv"):
         print("Loading:", csv_file)
         try:

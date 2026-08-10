@@ -21,9 +21,18 @@ This script verifies every link with three checks (plus one optional check):
 
   CHECK 4  CONSERVE   every numeric value stored in each DB table traces back to a
                       cell in the source workbook, within double-precision round-trip
-                      tolerance, after inverting the single declared unit transform
-                      (Fig_2g delay: seconds -> femtoseconds, x 1e15).  No value is
+                      tolerance, after inverting the declared unit transforms (Fig_2g
+                      and Extended_Fig_3b store the modelled frequency grid scaled by
+                      1e-12; the tidy step rescales them to THz).  No value is
                       invented; the tidy reshaping only rearranges source numbers.
+
+  CHECK 5  NORMALIZE  every value in the normalized DB (experiments / spectra /
+                      time_domain / derived_series) traces back to that figure's tidy
+                      CSV, and every tidy CSV is represented by at least one row.
+                      This is the check that sees silent loss (a panel whose columns
+                      no loader branch recognised, loading zero rows) and mis-routing
+                      (a modelled spectrum stored as a time trace) -- neither of which
+                      the per-figure checks above can detect.
 
   CHECK 2  REPRODUCE  (optional, --reproduce) re-run the whole pipeline into a
                       temporary tree and confirm it reproduces the committed DB
@@ -58,6 +67,7 @@ SRC_DIR = REPO / "source_data"
 SPLIT_DIR = REPO / "pipeline" / "output"
 TIDY_DIR = REPO / "pipeline" / "tidy_output"
 DEFAULT_DB = REPO / "output" / "double_slit.sqlite3"
+DEFAULT_NORMALIZED_DB = REPO / "pipeline" / "double_slit.sqlite3"
 
 # The five source workbooks the pipeline consumes (matches EXPECTED_FILES in
 # build_and_verify_pipeline.py).  source_data/ also ships an underscore-named
@@ -77,9 +87,30 @@ LABEL_COLUMNS = {"Series", "series", "Pump"}
 
 # Declared, intentional unit transforms applied during tidying.  (table, column) ->
 # function mapping a stored DB value back to the source-cell value it came from.
+#
+# Fig 2g and Extended Fig 3b (byte-identical arrays) store the *modelled* frequency grid
+# with an extra 1e-12 factor.  Rescaled by 1e12 it spans 217.391-245.902 THz -- exactly the
+# 1380 nm - 1220 nm window at c = 3e8 m/s (endpoints 5000/23 and 15000/61), the near-IR band
+# of the experiment, containing the measured Fig 2f grid (220.093-242.643 THz).  The tidy
+# step applies that rescale; this entry inverts it back to the stored source cell.
+#
+# (Fig 2g was previously read as a delay axis in seconds and multiplied by 1e15.  That
+# mislabelled a frequency grid as time, put modelled spectra into the time-domain table
+# and left the values ~1e3x off any source cell; the entry below replaces that reading.)
 INVERSE_TRANSFORMS = {
-    ("Fig_2g", "Delay_fs"): lambda v: v / 1e15,  # seconds -> femtoseconds
+    ("Fig_2g", "Frequency_THz"): lambda v: v / 1e12,
+    ("Extended_Fig_3b", "Frequency_THz"): lambda v: v / 1e12,
 }
+
+# No inverse-transform table is needed for CHECK 5: it traces the normalized DB back to
+# the *tidy CSV*, which already holds the rescaled values, whereas CHECK 4 traces the
+# per-figure DB back to the *source workbook*, upstream of the rescale.  Applying the
+# inversion at the normalized stage would undo a transform that was never applied there.
+
+# Values that are deliberately NOT sourced from the workbook.  `_infer_fig2_ab_slit_sep_fs`
+# stamps the slit separations quoted in the paper text (Fig 2a: 800 fs, Fig 2b: 500 fs)
+# onto experiments whose sheets do not carry that axis, so they cannot trace to a cell.
+PAPER_SOURCED = {("Fig_2a", "slit_separation_fs"), ("Fig_2b", "slit_separation_fs")}
 
 RTOL = 1e-9
 ATOL = 1e-12
@@ -241,9 +272,100 @@ def check_conserve(db_path: Path) -> tuple[bool, list[dict]]:
         maxrel = float(rel.max()) if rel.size else 0.0
         status = "PASS" if n_bad == 0 else "FAIL"
         ok_all &= status == "PASS"
-        note = " [Delay_fs/1e15]" if t == "Fig_2g" else ""
+        note = " [Frequency_THz/1e12]" if (t, "Frequency_THz") in INVERSE_TRANSFORMS else ""
         rows.append({"item": t, "status": status,
                      "detail": f"{values.size} values, max_rel={maxrel:.2e}, off={n_bad}{note}"})
+    con.close()
+    _print_rows(rows)
+    return ok_all, rows
+
+
+def check_normalized(db_path: Path) -> tuple[bool, list[dict]]:
+    """CHECK 5 -- the normalized DB (experiments / spectra / time_domain /
+    derived_series) is a faithful, complete routing of the tidy CSVs.
+
+    Two failure modes this catches, both of which have occurred in this pipeline:
+
+      * silent loss -- a tidy CSV whose columns no branch recognised loaded zero rows
+        (this is how `spectra` sat empty while every other check reported PASS);
+      * mis-routing -- a panel landing in the wrong table, e.g. a modelled spectrum
+        stored as a time trace, which the per-figure checks cannot see because they
+        never look at the normalized schema.
+
+    Every stored value must trace back to a cell of that figure's tidy CSV, and every
+    tidy CSV must be represented by at least one row somewhere.
+    """
+    print("\n[CHECK 5] NORMALIZE  tidy CSV  ->  spectra / time_domain / derived_series "
+          f"(rtol={RTOL:g})")
+    rows, ok_all = [], True
+    if not db_path.exists():
+        rows.append({"item": db_path.name, "status": "FAIL", "detail": "normalized DB not found"})
+        _print_rows(rows)
+        return False, rows
+
+    con = sqlite3.connect(str(db_path))
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    needed = {"experiments", "spectra", "time_domain", "derived_series"}
+    missing = needed - tables
+    if missing:
+        rows.append({"item": "schema", "status": "FAIL",
+                     "detail": f"missing table(s): {', '.join(sorted(missing))}"})
+        con.close()
+        _print_rows(rows)
+        return False, rows
+
+    experiments = pd.read_sql("SELECT id, figure_ref FROM experiments", con)
+    seen_figures = set()
+
+    for _, exp in experiments.iterrows():
+        fig, eid = str(exp["figure_ref"]), int(exp["id"])
+        seen_figures.add(fig)
+        csv = find_one(TIDY_DIR, f"{fig}_tidy.csv")
+        if csv is None:
+            rows.append({"item": fig, "status": "FAIL", "detail": "no matching tidy CSV"})
+            ok_all = False
+            continue
+        source = numeric_cells(csv) if csv.suffix == ".xlsx" else pd.read_csv(csv)\
+            .apply(pd.to_numeric, errors="coerce").to_numpy(float).ravel()
+        source = np.sort(source[np.isfinite(source)])
+
+        collected, placements = [], []
+        for tbl in ("spectra", "time_domain", "derived_series"):
+            db = pd.read_sql(f"SELECT * FROM {tbl} WHERE experiment_id = {eid}", con)
+            if db.empty:
+                continue
+            placements.append(f"{tbl}={len(db)}")
+            for col in db.columns:
+                if col in {"id", "experiment_id"} or col in LABEL_COLUMNS:
+                    continue
+                if (fig, col) in PAPER_SOURCED:
+                    continue
+                vals = pd.to_numeric(db[col], errors="coerce").to_numpy(float)
+                collected.append(vals[np.isfinite(vals)])
+
+        if not placements:
+            rows.append({"item": fig, "status": "FAIL",
+                         "detail": "loaded 0 rows into every table (unrecognised columns?)"})
+            ok_all = False
+            continue
+
+        values = np.concatenate(collected) if collected else np.array([])
+        rel = nearest_rel_error(values, source)
+        n_bad = int((rel > RTOL).sum())
+        maxrel = float(rel.max()) if rel.size else 0.0
+        status = "PASS" if n_bad == 0 else "FAIL"
+        ok_all &= status == "PASS"
+        rows.append({"item": fig, "status": status,
+                     "detail": f"{', '.join(placements)}; {values.size} values, "
+                               f"max_rel={maxrel:.2e}, off={n_bad}"})
+
+    # Every tidy CSV must be represented by an experiment.
+    for csv in sorted(TIDY_DIR.rglob("*_tidy.csv")):
+        fig = csv.name[: -len("_tidy.csv")]
+        if fig not in seen_figures:
+            rows.append({"item": fig, "status": "FAIL", "detail": "tidy CSV has no experiment row"})
+            ok_all = False
+
     con.close()
     _print_rows(rows)
     return ok_all, rows
@@ -314,6 +436,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="100% fidelity check: source XLSX -> SQLite.")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB,
                     help="canonical per-figure SQLite DB (default: output/double_slit.sqlite3)")
+    ap.add_argument("--normalized-db", type=Path, default=DEFAULT_NORMALIZED_DB,
+                    help="normalized SQLite DB with experiments/spectra/time_domain/"
+                         "derived_series (default: pipeline/double_slit.sqlite3)")
     ap.add_argument("--reproduce", action="store_true",
                     help="also re-run the whole pipeline in a temp tree and diff (CHECK 2)")
     ap.add_argument("--report", type=Path, default=REPO / "verify" / "fidelity_report.csv",
@@ -337,6 +462,7 @@ def main() -> int:
         ("CHECK 1 SPLIT", check_split()),
         ("CHECK 3 LOAD", check_load(args.db)),
         ("CHECK 4 CONSERVE", check_conserve(args.db)),
+        ("CHECK 5 NORMALIZE", check_normalized(args.normalized_db)),
     ]:
         ok, rows = ok_rows
         results[name] = ok
